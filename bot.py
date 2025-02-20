@@ -4,6 +4,8 @@ import pytz
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 import os
+from docx import Document
+from datetime import timedelta
 
 # --- Инициализация базы данных ---
 conn = sqlite3.connect("mood_tracker.db", check_same_thread=False)
@@ -146,6 +148,53 @@ def ask_questions(user_id, force=False):
     else:
         print(f"Пропускаем опрос для {user_id}, так как сейчас {current_hour}:00 в его часовом поясе.")
 
+
+def export_responses_to_docx(user_id):
+    cursor.execute("""
+        SELECT r.session_id, s.start_time, q.text, r.answer
+        FROM responses r
+        JOIN sessions s ON r.session_id = s.session_id
+        JOIN questions q ON r.question_id = q.id
+        WHERE s.user_id = ?
+        ORDER BY s.start_time, q.order_num
+    """, (user_id,))
+    responses = cursor.fetchall()
+
+    if not responses:
+        return None
+
+    doc = Document()
+    doc.add_heading("Отчет по ответам пользователя", level=1)
+
+    weekly_group = {}
+    for session_id, start_time, question, answer in responses:
+        week_start = (datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S") - timedelta(
+            days=datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S").weekday())).date()
+        day = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S").date()
+
+        if week_start not in weekly_group:
+            weekly_group[week_start] = {}
+        if day not in weekly_group[week_start]:
+            weekly_group[week_start][day] = {}
+        if session_id not in weekly_group[week_start][day]:
+            weekly_group[week_start][day][session_id] = []
+
+        weekly_group[week_start][day][session_id].append((question, answer))
+
+    for week, days in sorted(weekly_group.items()):
+        doc.add_heading(f"Неделя {week}", level=2)
+        for day, sessions in sorted(days.items()):
+            doc.add_heading(f"Дата: {day}", level=3)
+            for session_id, qa_pairs in sessions.items():
+                doc.add_heading(f"Сессия {session_id}", level=4)
+                for question, answer in qa_pairs:
+                    doc.add_paragraph(f"Вопрос: {question}", style='List Bullet')
+                    doc.add_paragraph(f"Ответ: {answer}", style='BodyText')
+
+    file_path = f"responses_{user_id}.docx"
+    doc.save(file_path)
+    return file_path
+
 # --- Обработчики команд ---
 @bot.message_handler(commands=['start'])
 def start_message(message):
@@ -169,6 +218,17 @@ def save_settings(message):
 @bot.message_handler(commands=['ask'])
 def manual_question(message):
     ask_questions(message.chat.id, force=True)
+
+@bot.message_handler(commands=['export'])
+def export_command(message):
+    user_id = message.chat.id
+    file_path = export_responses_to_docx(user_id)
+    if file_path:
+        with open(file_path, "rb") as file:
+            bot.send_document(user_id, file)
+        os.remove(file_path)
+    else:
+        bot.send_message(user_id, "Нет данных для экспорта.")
 
 # --- Запуск бота ---
 bot.polling()
